@@ -12,117 +12,114 @@ import android.os.Build
 import android.os.IBinder
 import android.util.Log
 import androidx.core.app.NotificationCompat
-import okhttp3.*
+import org.json.JSONObject
 import java.io.File
-import java.io.IOException
 
 class StellaService : Service() {
 
     private val TAG = "StellaService"
     private var mediaPlayer: MediaPlayer? = null
 
-    override fun onBind(intent: Intent?): IBinder? = null
-
     override fun onCreate() {
         super.onCreate()
-        Log.d(TAG, "Stella service created")
-        startForegroundService()
+        startForegroundServiceWithNotification("Stella ready")
+        Log.d(TAG, "StellaService created")
     }
 
-    private fun startForegroundService() {
+    override fun onBind(intent: Intent?): IBinder? = null
+
+    private fun startForegroundServiceWithNotification(text: String) {
         val channelId = Config.NOTIFICATION_CHANNEL_ID
-        val channelName = "Stella Assistant"
+        val channelName = "Stella Voice Service"
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            val channel = NotificationChannel(
-                channelId,
-                channelName,
-                NotificationManager.IMPORTANCE_LOW
-            )
-            val manager = getSystemService(NotificationManager::class.java)
-            manager?.createNotificationChannel(channel)
+            val nm = getSystemService(NotificationManager::class.java)
+            val channel = NotificationChannel(channelId, channelName, NotificationManager.IMPORTANCE_LOW)
+            nm.createNotificationChannel(channel)
         }
 
-        val notification: Notification = NotificationCompat.Builder(this, channelId)
-            .setContentTitle("Stella is active")
-            .setContentText("Listening for earbud gestures…")
+        val notif: Notification = NotificationCompat.Builder(this, channelId)
+            .setContentTitle("Stella")
+            .setContentText(text)
             .setSmallIcon(android.R.drawable.ic_btn_speak_now)
+            .setOngoing(true)
             .build()
 
-        startForeground(Config.NOTIFICATION_ID, notification)
+        startForeground(Config.NOTIFICATION_ID, notif)
     }
 
     companion object {
-
         fun startRecording(context: Context) {
-            Log.d("StellaService", "Recording started…")
+            val i = Intent(context, StellaService::class.java)
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                context.startForegroundService(i)
+            } else {
+                context.startService(i)
+            }
 
-            val filePath = AudioRecorder.startRecording(
-                context,
-                Config.RECORD_FILENAME
-            )
-
-            // Wait a short time then stop and send audio
             Thread {
-                Thread.sleep(1500)
-                val finalFile = AudioRecorder.stopRecording()
-                if (finalFile != null) {
-                    sendToServer(context, File(finalFile))
+                try {
+                    WakeLockManager.acquire(context, 8_000L)
+
+                    val filePath = AudioRecorder.startRecording(context, Config.RECORD_FILENAME)
+                    Thread.sleep(1600)
+                    val finalPath = AudioRecorder.stopRecording() ?: return@Thread
+
+                    val json: JSONObject = ApiClient.uploadAudio(Config.SERVER_URL, finalPath)
+                    handleServerResponse(context, json)
+
+                    try { File(finalPath).delete() } catch (_: Exception) {}
+                } catch (e: Exception) {
+                    Log.e("StellaService", "Error in flow", e)
+                } finally {
+                    WakeLockManager.release()
                 }
             }.start()
         }
 
-        private fun sendToServer(context: Context, audioFile: File) {
-            Log.d("StellaService", "Sending audio to server…")
-
-            val client = OkHttpClient()
-
-            val requestBody = MultipartBody.Builder()
-                .setType(MultipartBody.FORM)
-                .addFormDataPart(
-                    "audio",
-                    audioFile.name,
-                    RequestBody.create(MediaType.parse("audio/3gp"), audioFile)
-                )
-                .build()
-
-            val request = Request.Builder()
-                .url(Config.SERVER_URL)
-                .post(requestBody)
-                .build()
-
-            client.newCall(request).enqueue(object : Callback {
-                override fun onFailure(call: Call, e: IOException) {
-                    Log.e("StellaService", "Error sending audio", e)
-                }
-
-                override fun onResponse(call: Call, response: Response) {
-                    val audioBytes = response.body()?.bytes()
-                    if (audioBytes != null) {
-                        playAudio(context, audioBytes)
-                    }
-                }
-            })
-        }
-
-        private fun playAudio(context: Context, audio: ByteArray) {
+        private fun handleServerResponse(context: Context, json: JSONObject) {
             try {
-                val tempFile = File(context.cacheDir, "response.mp3")
-                tempFile.writeBytes(audio)
+                if (json.has("audio_path")) {
+                    Mp3Player.playFromPath(context, json.getString("audio_path"))
+                    return
+                }
 
-                val player = MediaPlayer().apply {
-                    setAudioAttributes(
-                        AudioAttributes.Builder()
-                            .setUsage(AudioAttributes.USAGE_MEDIA)
-                            .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
+                if (json.has("audio_url")) {
+                    streamAndPlay(context, json.getString("audio_url"))
+                    return
+                }
+
+                if (json.has("text")) {
+                    val nm = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+                    nm.notify(
+                        Config.NOTIFICATION_ID,
+                        NotificationCompat.Builder(context, Config.NOTIFICATION_CHANNEL_ID)
+                            .setContentTitle("Stella")
+                            .setContentText(json.getString("text"))
+                            .setSmallIcon(android.R.drawable.ic_btn_speak_now)
                             .build()
                     )
-                    setDataSource(tempFile.absolutePath)
-                    prepare()
-                    start()
                 }
             } catch (e: Exception) {
-                e.printStackTrace()
+                Log.e("StellaService", "Response handling error", e)
+            }
+        }
+
+        private fun streamAndPlay(context: Context, url: String) {
+            try {
+                val mp = MediaPlayer()
+                mp.setAudioAttributes(
+                    AudioAttributes.Builder()
+                        .setUsage(AudioAttributes.USAGE_MEDIA)
+                        .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
+                        .build()
+                )
+                mp.setDataSource(url)
+                mp.setOnPreparedListener { it.start() }
+                mp.setOnCompletionListener { it.release() }
+                mp.prepareAsync()
+            } catch (e: Exception) {
+                Log.e("StellaService", "Streaming error", e)
             }
         }
     }
