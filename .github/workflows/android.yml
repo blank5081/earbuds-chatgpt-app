@@ -1,16 +1,16 @@
 name: Android Build
 
 on:
-  push:
-    branches: [ main ]
   workflow_dispatch:
 
 jobs:
   build:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
 
     steps:
+      - name: Set up job
+        run: echo "Starting Android build..."
+
       - name: Checkout code
         uses: actions/checkout@v4
 
@@ -25,34 +25,32 @@ jobs:
         with:
           gradle-version: '8.4'
 
-      - name: Build APK (use installed Gradle to build module - verbose)
+      - name: Build APK (save full log + verbose)
         run: |
           echo "=== Gradle version ==="
           gradle --version || true
 
-          echo "=== Running assembleDebug (verbose) ==="
-          # build with stacktrace + info so we can see full errors if any
-          gradle -p android-app assembleDebug --stacktrace --info --no-daemon || true
+          echo "=== Running assembleDebug and saving build.log ==="
+          gradle -p android-app assembleDebug --stacktrace --info --warning-mode=all --no-daemon > build.log 2>&1 || true
 
-          echo "==== Build finished. Show last lines of possible outputs ===="
-          # show any APK files or output info to help diagnostics
+          echo "=== LAST 200 lines of build.log ==="
+          tail -n 200 build.log || true
+
+          echo "=== Show any APKs that were built ==="
           find android-app/app -type f -name "*.apk" -print || true
 
-      - name: Show built APK files (debug & release)
-        run: |
-          echo "Listing debug APK dir (if exists):"
-          ls -la android-app/app/build/outputs/apk/debug || true
-          echo "Listing apk outputs dir (if exists):"
-          ls -la android-app/app/build/outputs/apk || true
-          echo "Listing all APKs under app (if any):"
-          find android-app/app -type f -name "*.apk" -print || true
+      - name: Upload build log artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: stella-build-log
+          path: build.log
 
-      - name: Upload APK artifact (try debug + any apk)
+      - name: Upload APK artifact (try all folders)
         uses: actions/upload-artifact@v4
         with:
           name: stella-apk
           path: |
-            android-app/app/build/outputs/apk/debug/*.apk
-            android-app/app/build/outputs/apk/*.apk
-            android-app/app/**/outputs/**/*.apk
-            android-app/app/**/*.apk
+            android-app/app/build/outputs/apk/**/*.apk
+            android-app/**/outputs/**/*.apk
+            **/*.apk
+          if-no-files-found: warn
