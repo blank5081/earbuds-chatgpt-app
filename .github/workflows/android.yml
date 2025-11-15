@@ -24,12 +24,17 @@ jobs:
         with:
           gradle-version: '8.4'
 
-      - name: Build APK (use installed Gradle to build module)
+      - name: Build APK (use installed Gradle to build module - verbose)
         run: |
           # show Gradle version to confirm installation
           gradle --version
-          # run assembleDebug for android-app module
-          gradle -p android-app assembleDebug
+
+          # run assembleDebug with verbose logging and stacktrace
+          gradle -p android-app assembleDebug --stacktrace --info --no-daemon || true
+
+          # print last 400 lines of the Gradle build output file (if present)
+          echo "---- LAST 400 LINES OF BUILD OUTPUT ----"
+          tail -n 400 android-app/app/build.gradle || true
 
       - name: Upload APK artifact
         uses: actions/upload-artifact@v4
